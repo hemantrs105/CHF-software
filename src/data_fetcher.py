@@ -2,8 +2,21 @@ import ee
 import geemap
 import pandas as pd
 import os
+import numpy as np
 from tqdm import tqdm
 from src.gee_utils import GEEUtils
+
+# Strict Schema Definition
+CORE_COLUMNS = ['Unit_ID', 'Strata_ID']
+BAND_NAMES = [
+    'max_ndvi',
+    'max_lswi',
+    'max_backscatter',
+    'integrated_backscatter',
+    'integrated_fapar',
+    'rainy_days',
+    'adjusted_rainfall'
+]
 
 def fetch_metrics(year, crop_map_asset, roi_asset_id, output_dir, dates_config, target_crop_class=None, chunk_size=50):
     """
@@ -50,6 +63,16 @@ def fetch_metrics(year, crop_map_asset, roi_asset_id, output_dir, dates_config, 
     if os.path.exists(output_csv):
         os.remove(output_csv)
 
+    # Build Expected Columns List
+    # We expect mean and stdDev for every band
+    metric_columns = []
+    for band in BAND_NAMES:
+        metric_columns.append(f"{band}_mean")
+        metric_columns.append(f"{band}_stdDev")
+
+    # Add calculated column
+    final_columns = CORE_COLUMNS + metric_columns + ['condition_variability']
+
     # 5. Loop in Batches
     total_batches = (len(unit_ids) + chunk_size - 1) // chunk_size
 
@@ -85,10 +108,22 @@ def fetch_metrics(year, crop_map_asset, roi_asset_id, output_dir, dates_config, 
                 continue
 
             # Calculate Spatial CV
+            # CV = StdDev / Mean (of Max NDVI)
+            # Handle potential missing columns if image was empty or masked out
             if 'max_ndvi_stdDev' in df_batch.columns and 'max_ndvi_mean' in df_batch.columns:
-                df_batch['condition_variability'] = df_batch['max_ndvi_stdDev'] / df_batch['max_ndvi_mean']
+                # Use numpy for safe division (handles division by zero -> inf, NaN -> NaN)
+                df_batch['condition_variability'] = df_batch['max_ndvi_stdDev'].div(df_batch['max_ndvi_mean'])
+                # Replace inf with NaN or 0?
+                # If mean is 0, CV is undefined.
+                # User asked to "handle NaNs gracefully".
+                # Let's fill inf with NaN so it's consistent.
+                df_batch['condition_variability'] = df_batch['condition_variability'].replace([np.inf, -np.inf], np.nan)
             else:
-                df_batch['condition_variability'] = 0
+                df_batch['condition_variability'] = np.nan
+
+            # STRICT SCHEMA ENFORCEMENT
+            # This reorders columns and fills missing ones with NaN
+            df_batch = df_batch.reindex(columns=final_columns)
 
             # Append to CSV
             header = not os.path.exists(output_csv)
